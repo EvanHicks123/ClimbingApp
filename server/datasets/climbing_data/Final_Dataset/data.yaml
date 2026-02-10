@@ -1,0 +1,15 @@
+path: ../datasets/climbing_data/Final_Dataset  # The root folder
+train: train/images
+val: valid/images
+test: test/images
+
+# ... (path, train, val lines stay the same) ...
+
+nc: 6  # "Number of Classes" (Important: tell it there are 6 types now)
+names:
+  0: Jug
+  1: Crimp
+  2: Pinch
+  3: Slope
+  4: Pocket
+  5: Volume

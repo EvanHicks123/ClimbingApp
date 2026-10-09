@@ -1,11 +1,30 @@
+
+import ngrokConfig from '../../ngrok_url.json';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { BlurView } from 'expo-blur';
+import * as FileSystem from 'expo-file-system/legacy';
 import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, { Defs, RadialGradient, Rect, Stop } from 'react-native-svg';
 import Constants from 'expo-constants';
-import { useState, useRef, useEffect } from 'react';
-import { Button, StyleSheet, Text, TouchableOpacity, View, Image, Alert, ActivityIndicator, Dimensions, Animated, LayoutAnimation, Platform, UIManager, PanResponder, Pressable } from 'react-native';
+import { useNavigation } from 'expo-router';
+import React, { useState, useRef, useEffect } from 'react';
+import { BlurView } from 'expo-blur';
+import {
+    Button,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+    Image,
+    Alert,
+    Dimensions,
+    Animated,
+    LayoutAnimation,
+    Platform,
+    UIManager,
+    PanResponder,
+    Pressable
+} from 'react-native';
 
 const HOLD_TYPES = ["Jug", "Crimp", "Pinch", "Sloper", "Pocket", "Volume"];
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -18,7 +37,96 @@ const HOLD_WEIGHTS: Record<string, number> = {
     "Jug": 1.0, "Volume": 2.0, "Pinch": 3.5, "Sloper": 5.0, "Crimp": 6.0, "Pocket": 7.0, "hold": 3.0
 };
 
+// --- ISOLATED HOLD COMPONENT FOR INDIVIDUAL GLOW-UPS ---
+const HoldBox = ({ box, index, step, startData, isTop, isPath, isEditing, onHoldClick }: any) => {
+    const isStart = !!startData;
+    const isSelected = isStart || isTop || isPath;
+
+    if (box.label === 'Volume' && !box.userModified) return null;
+    if ((step === 'EDIT' || step === 'SUMMARY') && !isSelected) return null;
+
+    let borderColor = 'rgba(255,255,255,0.4)';
+    let tintColor = 'transparent';
+    let borderWidth = isSelected ? 3 : 1.5;
+    let labelColor = '#999';
+
+    if (isStart) {
+        borderColor = startData.clicks === 1 ? '#39FF14' : '#008000';
+        tintColor = startData.clicks === 1 ? 'rgba(57, 255, 20, 0.25)' : 'rgba(0, 128, 0, 0.45)';
+        labelColor = borderColor;
+    } else if (isTop) {
+        borderColor = '#FF003F';
+        tintColor = 'rgba(255, 0, 63, 0.25)';
+        labelColor = borderColor;
+    } else if (isPath) {
+        borderColor = '#FFE600';
+        tintColor = 'rgba(255, 230, 0, 0.25)';
+        labelColor = borderColor;
+    }
+
+    if (isEditing) {
+        borderColor = '#0A84FF';
+        borderWidth = 4;
+        tintColor = 'rgba(10, 132, 255, 0.3)';
+    }
+
+    const glowOpacity = useRef(new Animated.Value(isSelected || isEditing ? 1 : 0)).current;
+    const prevClicks = useRef(startData?.clicks);
+
+    useEffect(() => {
+        if (isSelected || isEditing) {
+            Animated.timing(glowOpacity, {
+                toValue: 1,
+                duration: 400,
+                useNativeDriver: true
+            }).start();
+        } else {
+            glowOpacity.setValue(0);
+        }
+    }, [isSelected, isEditing]);
+
+    useEffect(() => {
+        if (isStart && prevClicks.current === 1 && startData.clicks === 2) {
+            glowOpacity.setValue(0.2);
+            Animated.timing(glowOpacity, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+        }
+        prevClicks.current = startData?.clicks;
+    }, [startData?.clicks, isStart]);
+
+    return (
+        <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => onHoldClick(index)}
+            style={[styles.box, {
+                left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`,
+                zIndex: isSelected || isEditing ? 15 : 5,
+                borderWidth: (isSelected || isEditing) ? 0 : 1.5,
+                borderColor: (isSelected || isEditing) ? 'transparent' : 'rgba(255,255,255,0.4)'
+            }]}
+        >
+            <Animated.View style={[StyleSheet.absoluteFill, {
+                borderRadius: 8,
+                borderWidth: borderWidth,
+                borderColor: borderColor,
+                backgroundColor: tintColor,
+                opacity: glowOpacity
+            }]} />
+
+            {(step === 'EDIT' || step === 'SUMMARY') && isSelected && (
+                <View style={[styles.miniTag, { borderColor: labelColor }]}>
+                    <Text style={styles.miniTagText}>{box.label.charAt(0)}</Text>
+                </View>
+            )}
+        </TouchableOpacity>
+    );
+};
+
 export default function App() {
+    const navigation = useNavigation();
+    useEffect(() => {
+        navigation.setOptions({ headerShown: false });
+    }, [navigation]);
+
     const [permission, requestPermission] = useCameraPermissions();
     const cameraRef = useRef<CameraView>(null);
     const [picture, setPicture] = useState<string | null>(null);
@@ -36,53 +144,89 @@ export default function App() {
     const popoverOpacity = useRef(new Animated.Value(0)).current;
     const popoverScale = useRef(new Animated.Value(0.95)).current;
 
-    // --- STRICT BOTTOM SHEET MATH ---
+    const navTranslateX = useRef(new Animated.Value(0)).current;
+    const navOpacity = useRef(new Animated.Value(1)).current;
+
+    const loadingProgress = useRef(new Animated.Value(0)).current;
+
+    useEffect(() => {
+        if (loading) {
+            loadingProgress.setValue(0);
+            Animated.loop(
+                Animated.sequence([
+                    Animated.timing(loadingProgress, { toValue: 1, duration: 800, useNativeDriver: true }),
+                    Animated.timing(loadingProgress, { toValue: 0, duration: 800, useNativeDriver: true })
+                ])
+            ).start();
+        } else {
+            loadingProgress.stopAnimation();
+        }
+    }, [loading]);
+
     const summaryTranslateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
-    const lastCardY = useRef(0);
-    const SHEET_HEIGHT = 340;
+    const dragOffset = useRef(0);
+    const isAnimating = useRef(false);
+    const SHEET_HEIGHT = 360;
     const HEADER_HEIGHT = 65;
     const SHEET_OFFSET = SHEET_HEIGHT - HEADER_HEIGHT;
 
+    function toggleSummaryCard() {
+        if (isAnimating.current) return;
+        isAnimating.current = true;
+
+        const currentY = (summaryTranslateY as any)._value;
+        const targetY = currentY > (SHEET_OFFSET / 2) ? 0 : SHEET_OFFSET;
+
+        summaryTranslateY.flattenOffset();
+
+        Animated.spring(summaryTranslateY, {
+            toValue: targetY,
+            bounciness: 6,
+            useNativeDriver: true
+        }).start(() => {
+            isAnimating.current = false;
+        });
+    }
+
     const summaryPan = useRef(
         PanResponder.create({
-            // Capture the touch immediately so we can detect both taps and drags
-            onStartShouldSetPanResponder: () => true,
-            onMoveShouldSetPanResponder: () => true,
+            onStartShouldSetPanResponder: () => false,
+            onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dy) > 10,
             onPanResponderGrant: () => {
-                summaryTranslateY.setOffset(lastCardY.current);
-                summaryTranslateY.setValue(0);
+                summaryTranslateY.stopAnimation((currentValue) => {
+                    dragOffset.current = currentValue;
+                    summaryTranslateY.setOffset(currentValue);
+                    summaryTranslateY.setValue(0);
+                });
             },
             onPanResponderMove: (_, gestureState) => {
-                const newY = lastCardY.current + gestureState.dy;
-                if (newY >= -10 && newY <= SHEET_OFFSET + 20) {
+                const absoluteY = dragOffset.current + gestureState.dy;
+
+                if (absoluteY < 0) {
+                    const resistedY = absoluteY * 0.1;
+                    summaryTranslateY.setValue(resistedY - dragOffset.current);
+                } else if (absoluteY > SHEET_OFFSET) {
+                    const overDrag = absoluteY - SHEET_OFFSET;
+                    const resistedY = SHEET_OFFSET + (overDrag * 0.1);
+                    summaryTranslateY.setValue(resistedY - dragOffset.current);
+                } else {
                     summaryTranslateY.setValue(gestureState.dy);
                 }
             },
             onPanResponderRelease: (_, gestureState) => {
                 summaryTranslateY.flattenOffset();
                 const currentY = (summaryTranslateY as any)._value;
+                let targetY: number;
 
-                // TAP DETECTION: If movement is less than 5 pixels, treat it as a tap
-                if (Math.abs(gestureState.dx) < 5 && Math.abs(gestureState.dy) < 5) {
-                    const isMinimized = lastCardY.current === SHEET_OFFSET;
-                    const targetY = isMinimized ? 0 : SHEET_OFFSET;
-                    Animated.spring(summaryTranslateY, { toValue: targetY, bounciness: 6, useNativeDriver: true }).start();
-                    lastCardY.current = targetY;
-                    return;
-                }
+                if (gestureState.dy > 30 || gestureState.vy > 0.5) targetY = SHEET_OFFSET;
+                else if (gestureState.dy < -30 || gestureState.vy < -0.5) targetY = 0;
+                else targetY = currentY > (SHEET_OFFSET / 2) ? SHEET_OFFSET : 0;
 
-                // DRAG / SWIPE DETECTION
-                if (gestureState.dy > 40 || gestureState.vy > 0.5) {
-                    Animated.spring(summaryTranslateY, { toValue: SHEET_OFFSET, bounciness: 6, useNativeDriver: true }).start();
-                    lastCardY.current = SHEET_OFFSET;
-                } else if (gestureState.dy < -40 || gestureState.vy < -0.5) {
-                    Animated.spring(summaryTranslateY, { toValue: 0, bounciness: 6, useNativeDriver: true }).start();
-                    lastCardY.current = 0;
-                } else {
-                    const snapY = currentY > (SHEET_OFFSET / 2) ? SHEET_OFFSET : 0;
-                    Animated.spring(summaryTranslateY, { toValue: snapY, bounciness: 6, useNativeDriver: true }).start();
-                    lastCardY.current = snapY;
-                }
+                Animated.spring(summaryTranslateY, {
+                    toValue: targetY,
+                    bounciness: 6,
+                    useNativeDriver: true
+                }).start();
             }
         })
     ).current;
@@ -90,9 +234,7 @@ export default function App() {
     useEffect(() => {
         if (step === 'SUMMARY') {
             summaryTranslateY.setValue(SCREEN_HEIGHT);
-            Animated.spring(summaryTranslateY, { toValue: 0, bounciness: 5, useNativeDriver: true }).start(() => {
-                lastCardY.current = 0;
-            });
+            Animated.spring(summaryTranslateY, { toValue: 0, bounciness: 6, useNativeDriver: true }).start();
         }
     }, [step]);
 
@@ -141,17 +283,64 @@ export default function App() {
         }
     }
 
+    const fetchWithTimeout = async (url: string, options: any, timeout = 2500) => {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        return response;
+    };
+
+
     async function detectHolds(imageUri: string) {
-        const formData = new FormData();
-        formData.append('image', { uri: imageUri, name: 'climb.jpg', type: 'image/jpeg' } as any);
         try {
-            const SERVER_URL = "https://alene-cloque-unperceivably.ngrok-free.dev/detect";
-            const response = await fetch(SERVER_URL, { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } });
-            const data = await response.json();
-            if (!response.ok) { Alert.alert("Error", data.error); setLoading(false); return; }
+            const base64 = await FileSystem.readAsStringAsync(imageUri, {
+                encoding: FileSystem.EncodingType.Base64,
+            });
+
+            const body = JSON.stringify({ image: base64 });
+            const headers = {
+                'Content-Type': 'application/json',
+                'ngrok-skip-browser-warning': 'true',
+            };
+
+            const hostUri = Constants.expoConfig?.hostUri;
+            const pcIp = hostUri ? hostUri.split(':')[0] : '127.0.0.1';
+            const LOCAL_URL = `http://${pcIp}:5000/detect`;
+            const NGROK_URL = ngrokConfig.NGROK_URL;
+
+            let response;
+            try {
+                response = await fetchWithTimeout(LOCAL_URL, { method: 'POST', body, headers }, 2500);
+            } catch {
+                response = await fetch(NGROK_URL, { method: 'POST', body, headers });
+            }
+
+            const rawText = await response.text();
+            console.log("Server raw response:", rawText);
+
+            let data;
+            try {
+                data = JSON.parse(rawText);
+            } catch {
+                Alert.alert("Server Error", `Non-JSON response:\n${rawText.slice(0, 300)}`);
+                setLoading(false);
+                return;
+            }
+
+            if (!response?.ok) {
+                Alert.alert("Error", data.error);
+                setLoading(false);
+                return;
+            }
+
             setBoxes(data.holds || []);
             softReset();
-        } catch (error) { Alert.alert("Error", "Could not reach server."); setLoading(false); }
+        } catch (error: any) {
+            console.error("Detect holds failed:", error);
+            Alert.alert("Network/Server Error", error?.message || String(error));
+            setLoading(false);
+        }
     }
 
     function hardReset() {
@@ -164,17 +353,25 @@ export default function App() {
     function softReset() {
         setStep('START'); setStartHolds([]); setTopHold(null); setPathHolds([]);
         setEditingHoldIndex(null); setLoading(false);
+        navTranslateX.setValue(0);
+        navOpacity.setValue(1);
     }
 
     function handleHoldClick(index: number) {
         if (step === 'START') {
             const existing = startHolds.find(h => h.index === index);
             if (existing) {
-                if (existing.clicks === 1) setStartHolds(startHolds.map(h => h.index === index ? { ...h, clicks: 2 } : h));
-                else setStartHolds(startHolds.filter(h => h.index !== index));
+                if (existing.clicks === 1) {
+                    setStartHolds(startHolds.map(h => h.index === index ? { ...h, clicks: 2 } : h));
+                } else {
+                    setStartHolds(startHolds.filter(h => h.index !== index));
+                }
             } else {
-                if (startHolds.length < 2) setStartHolds([...startHolds, { index, clicks: 1 }]);
-                else Alert.alert("Limit Reached", "Max 2 starting holds.");
+                if (startHolds.length < 2) {
+                    setStartHolds([...startHolds, { index, clicks: 1 }]);
+                } else {
+                    Alert.alert("Limit Reached", "Max 2 starting holds.");
+                }
             }
         }
         else if (step === 'TOP') {
@@ -194,6 +391,7 @@ export default function App() {
         if (editingHoldIndex === null) return;
         const updatedBoxes = [...boxes];
         updatedBoxes[editingHoldIndex].label = newType;
+        updatedBoxes[editingHoldIndex].userModified = true;
         setBoxes(updatedBoxes);
         closeEditMenu();
         if (step === 'SUMMARY') updateRouteStats(updatedBoxes);
@@ -203,21 +401,36 @@ export default function App() {
         if (!sequence || sequence.length < 2) return { grade: "V0", moves: 0 };
         let totalScore = 0; let moveCount = 0;
 
+        const wallVolumes = currentBoxes.filter(b => b.label === 'Volume');
+
         for (let i = 1; i < sequence.length; i++) {
             const prevMove = sequence[i-1]; const currMove = sequence[i];
             let px = 0, py = 0;
             prevMove.forEach(idx => { px += currentBoxes[idx].x + currentBoxes[idx].w/2; py += currentBoxes[idx].y + currentBoxes[idx].h/2; });
             px /= prevMove.length; py /= prevMove.length;
 
-            let cx = 0, cy = 0, maxHoldWeight = 0;
+            let cxPos = 0, cyPos = 0, maxHoldWeight = 0;
             currMove.forEach(idx => {
-                cx += currentBoxes[idx].x + currentBoxes[idx].w/2; cy += currentBoxes[idx].y + currentBoxes[idx].h/2;
+                cxPos += currentBoxes[idx].x + currentBoxes[idx].w/2; cyPos += currentBoxes[idx].y + currentBoxes[idx].h/2;
                 maxHoldWeight = Math.max(maxHoldWeight, HOLD_WEIGHTS[currentBoxes[idx].label] || 3.0);
             });
-            cx /= currMove.length; cy /= currMove.length;
+            cxPos /= currMove.length; cyPos /= currMove.length;
 
-            const dist = Math.sqrt(Math.pow(cx - px, 2) + Math.pow(cy - py, 2));
-            const distanceMultiplier = Math.max(1.0, dist / 12);
+            const dist = Math.sqrt(Math.pow(cxPos - px, 2) + Math.pow(cyPos - py, 2));
+            let distanceMultiplier = Math.max(1.0, dist / 12);
+
+            let volumeAssist = 0;
+            const midX = (px + cxPos) / 2;
+            const midY = (py + cyPos) / 2;
+
+            wallVolumes.forEach(vol => {
+                const volX = vol.x + vol.w/2;
+                const volY = vol.y + vol.h/2;
+                const distToVol = Math.sqrt(Math.pow(midX - volX, 2) + Math.pow(midY - volY, 2));
+                if (distToVol < 20) volumeAssist = 0.5;
+            });
+
+            distanceMultiplier = Math.max(1.0, distanceMultiplier - volumeAssist);
             totalScore += (maxHoldWeight * distanceMultiplier);
             moveCount++;
         }
@@ -248,29 +461,58 @@ export default function App() {
         setRouteStats({ grade: stats.grade, moves: stats.moves, holds: totalHolds });
     }
 
-    function goNextStep() {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    function animateNav(direction: 'next' | 'back', nextStep: any) {
+        const outX = direction === 'next' ? -50 : 50;
+        const inX = direction === 'next' ? 50 : -50;
 
+        Animated.parallel([
+            Animated.timing(navTranslateX, { toValue: outX, duration: 150, useNativeDriver: true }),
+            Animated.timing(navOpacity, { toValue: 0, duration: 150, useNativeDriver: true })
+        ]).start(() => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setStep(nextStep);
+            navTranslateX.setValue(inX);
+            Animated.parallel([
+                Animated.timing(navTranslateX, { toValue: 0, duration: 150, useNativeDriver: true }),
+                Animated.timing(navOpacity, { toValue: 1, duration: 150, useNativeDriver: true })
+            ]).start();
+        });
+    }
+
+    function goNextStep() {
         if (step === 'START') {
-            if (startHolds.length === 0) return Alert.alert("Wait!", "Please select at least 1 starting hold.");
-            setStep('TOP');
+            if (startHolds.length === 0) {
+                return Alert.alert("Wait!", "Please select at least 1 starting hold.");
+            }
+            animateNav('next', 'TOP');
         } else if (step === 'TOP') {
-            if (topHold === null) return Alert.alert("Wait!", "Please select a top hold.");
-            setStep('ROUTE');
+            if (topHold === null) {
+                return Alert.alert("Wait!", "Please select a top hold.");
+            }
+            animateNav('next', 'ROUTE');
         } else if (step === 'ROUTE') {
-            setStep('EDIT');
+            animateNav('next', 'EDIT');
         } else if (step === 'EDIT') {
             updateRouteStats(boxes);
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
             setStep('SUMMARY');
         }
     }
 
     function goBackStep() {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-        if (step === 'SUMMARY') setStep('EDIT');
-        else if (step === 'EDIT') { closeEditMenu(); setStep('ROUTE'); }
-        else if (step === 'ROUTE') setStep('TOP');
-        else if (step === 'TOP') setStep('START');
+        if (step === 'SUMMARY') {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setStep('EDIT');
+            navTranslateX.setValue(0);
+            navOpacity.setValue(1);
+        } else if (step === 'EDIT') {
+            closeEditMenu();
+            animateNav('back', 'ROUTE');
+        } else if (step === 'ROUTE') {
+            animateNav('back', 'TOP');
+        } else if (step === 'TOP') {
+            animateNav('back', 'START');
+        }
     }
 
     let popoverStyle = {};
@@ -297,18 +539,18 @@ export default function App() {
     if (picture) {
         return (
             <View style={styles.container}>
-                <View style={StyleSheet.absoluteFillObject}>
+                <View style={StyleSheet.absoluteFill}>
 
-                    <Image source={{ uri: picture }} style={StyleSheet.absoluteFillObject} resizeMode="stretch" />
+                    <Image source={{ uri: picture }} style={StyleSheet.absoluteFill} resizeMode="stretch" />
 
                     {(step === 'EDIT' || step === 'SUMMARY') && (
                         <MaskedView
-                            style={StyleSheet.absoluteFillObject}
+                            style={StyleSheet.absoluteFill}
                             maskElement={
                                 <Svg width="100%" height="100%">
                                     <Defs>
                                         <RadialGradient id="blurMask" cx={`${cx}%`} cy={`${cy}%`} rx={`${rx}%`} ry={`${ry}%`} fx={`${cx}%`} fy={`${cy}%`}>
-                                            <Stop offset="30%" stopColor="black" stopOpacity="0" />
+                                            <Stop offset="50%" stopColor="black" stopOpacity="0" />
                                             <Stop offset="100%" stopColor="black" stopOpacity="1" />
                                         </RadialGradient>
                                     </Defs>
@@ -316,63 +558,50 @@ export default function App() {
                                 </Svg>
                             }
                         >
-                            <BlurView intensity={80} tint="light" style={StyleSheet.absoluteFillObject} />
+                            <Image source={{ uri: picture }} style={StyleSheet.absoluteFill} resizeMode="stretch" blurRadius={10} />
                         </MaskedView>
                     )}
 
                     {!loading && boxes.map((box, index) => {
-                        if (box.label === 'Volume') return null;
-
                         const startData = startHolds.find(h => h.index === index);
-                        const isStart = !!startData;
                         const isTop = topHold === index;
                         const isPath = pathHolds.includes(index);
-                        const isSelected = isStart || isTop || isPath;
-
-                        if ((step === 'EDIT' || step === 'SUMMARY') && !isSelected) return null;
-
-                        let borderColor = 'rgba(255,255,255,0.3)';
-                        let tintColor = 'transparent';
-                        let borderWidth = isSelected ? 3 : 1;
-                        let labelColor = '#999';
-
-                        if (isStart) {
-                            borderColor = startData.clicks === 1 ? '#39FF14' : '#008000'; tintColor = startData.clicks === 1 ? 'rgba(57, 255, 20, 0.2)' : 'rgba(0, 128, 0, 0.4)'; labelColor = borderColor;
-                        } else if (isTop) {
-                            borderColor = '#FF003F'; tintColor = 'rgba(255, 0, 63, 0.2)'; labelColor = borderColor;
-                        } else if (isPath) {
-                            borderColor = '#FFE600'; tintColor = 'rgba(255, 230, 0, 0.2)'; labelColor = borderColor;
-                        }
-
-                        if (editingHoldIndex === index) {
-                            borderColor = '#0A84FF';
-                            borderWidth = 4;
-                            tintColor = 'rgba(10, 132, 255, 0.25)';
-                        }
+                        const isEditing = editingHoldIndex === index;
 
                         return (
-                            <TouchableOpacity key={index} activeOpacity={0.8} onPress={() => handleHoldClick(index)}
-                                              style={[ styles.box, { left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, borderColor: borderColor, backgroundColor: tintColor, borderWidth: borderWidth, zIndex: isSelected ? 15 : 5 } ]}
-                            >
-                                {(step === 'EDIT' || step === 'SUMMARY') && isSelected && (
-                                    <View style={[styles.miniTag, { borderColor: labelColor }]}>
-                                        <Text style={styles.miniTagText}>{box.label.charAt(0)}</Text>
-                                    </View>
-                                )}
-                            </TouchableOpacity>
+                            <HoldBox
+                                key={index}
+                                box={box}
+                                index={index}
+                                step={step}
+                                startData={startData}
+                                isTop={isTop}
+                                isPath={isPath}
+                                isEditing={isEditing}
+                                onHoldClick={handleHoldClick}
+                            />
                         );
                     })}
 
                     {loading && (
-                        <View style={styles.loaderOverlay}>
-                            <ActivityIndicator size="large" color="#0A84FF" />
-                            <Text style={{color: 'white', marginTop: 12, fontWeight: '700', letterSpacing: 0.5}}>Processing Wall...</Text>
-                        </View>
+                        <BlurView intensity={100} tint="dark" style={styles.loaderOverlay}>
+                            <View style={styles.loadingTrack}>
+                                <Animated.View style={[styles.loadingIndicator, {
+                                    transform: [{
+                                        translateX: loadingProgress.interpolate({
+                                            inputRange: [0, 1],
+                                            outputRange: [0, 90]
+                                        })
+                                    }]}]}
+                                />
+                            </View>
+                            <Text style={styles.loadingText}>Analyzing Route</Text>
+                        </BlurView>
                     )}
 
                     {editingHoldIndex !== null && (
-                        <View style={[StyleSheet.absoluteFillObject, { zIndex: 100 }]} pointerEvents="box-none">
-                            <Pressable style={StyleSheet.absoluteFillObject} onPress={closeEditMenu} />
+                        <View style={[StyleSheet.absoluteFill, { zIndex: 100 }]} pointerEvents="box-none">
+                            <Pressable style={StyleSheet.absoluteFill} onPress={closeEditMenu} />
 
                             <Animated.View style={[styles.popoverMenu, popoverStyle, { opacity: popoverOpacity, transform: [{ scale: popoverScale }] }]} pointerEvents="box-none">
                                 <View style={styles.gridContainer}>
@@ -392,24 +621,17 @@ export default function App() {
 
                 <View style={styles.bottomOverlayContainer} pointerEvents="box-none">
                     {step === 'SUMMARY' ? (
-                        <Animated.View style={[styles.summaryCard, { transform: [{ translateY: summaryTranslateY }] }]}>
+                        <Animated.View style={[styles.summaryCard, { transform: [{ translateY: summaryTranslateY }] }]} {...summaryPan.panHandlers}>
 
-                            <View {...summaryPan.panHandlers} style={styles.sheetHeader}>
+                            <TouchableOpacity activeOpacity={1} onPress={toggleSummaryCard} style={styles.sheetHeader}>
                                 <View style={styles.dragHandle} />
-
-                                <Animated.Text style={[styles.summaryHeaderText, {
-                                    position: 'absolute', top: 32,
-                                    opacity: summaryTranslateY.interpolate({ inputRange: [0, SHEET_OFFSET], outputRange: [1, 0], extrapolate: 'clamp' })
-                                }]}>
+                                <Animated.Text style={[styles.summaryHeaderText, { position: 'absolute', top: 32, opacity: summaryTranslateY.interpolate({ inputRange: [0, SHEET_OFFSET], outputRange: [1, 0], extrapolate: 'clamp' }) }]}>
                                     Route Analysis
                                 </Animated.Text>
-                                <Animated.Text style={[styles.summaryHeaderText, {
-                                    position: 'absolute', top: 32, color: '#0A84FF',
-                                    opacity: summaryTranslateY.interpolate({ inputRange: [0, SHEET_OFFSET], outputRange: [0, 1], extrapolate: 'clamp' })
-                                }]}>
+                                <Animated.Text style={[styles.summaryHeaderText, { position: 'absolute', top: 32, color: '#0A84FF', opacity: summaryTranslateY.interpolate({ inputRange: [0, SHEET_OFFSET], outputRange: [0, 1], extrapolate: 'clamp' }) }]}>
                                     TAP OR PULL UP TO REVIEW
                                 </Animated.Text>
-                            </View>
+                            </TouchableOpacity>
 
                             <View style={styles.sheetContent}>
                                 <Text style={styles.summaryTitle}>Climb Graded</Text>
@@ -429,25 +651,25 @@ export default function App() {
                                     </View>
                                 </View>
 
-                                <TouchableOpacity onPress={hardReset} style={styles.primaryActionBtn}>
+                                <TouchableOpacity activeOpacity={0.8} onPress={hardReset} style={styles.primaryActionBtn}>
                                     <Text style={styles.primaryActionBtnText}>Finish</Text>
                                 </TouchableOpacity>
                             </View>
-
+                            <View style={styles.bottomFillerBox} />
                         </Animated.View>
                     ) : (
                         <View style={styles.darkNavBar}>
-                            <View style={styles.navCenter} pointerEvents="none">
+                            <Animated.View style={[styles.navCenter, { opacity: navOpacity, transform: [{ translateX: navTranslateX }] }]} pointerEvents="none">
                                 <Text style={styles.navMainTitle}>
                                     {step === 'START' ? "Starts (1/4)" : step === 'TOP' ? "Top Hold (2/4)" : step === 'ROUTE' ? "Path (3/4)" : "Review (4/4)"}
                                 </Text>
-                            </View>
+                            </Animated.View>
 
-                            <TouchableOpacity onPress={step === 'START' ? hardReset : goBackStep} style={styles.navActionLeft}>
+                            <TouchableOpacity activeOpacity={0.6} onPress={step === 'START' ? hardReset : goBackStep} style={styles.navActionLeft}>
                                 <Text style={styles.navSubText}>{step === 'START' ? "Cancel" : "Back"}</Text>
                             </TouchableOpacity>
 
-                            <TouchableOpacity onPress={goNextStep} style={styles.nextButton}>
+                            <TouchableOpacity activeOpacity={0.8} onPress={goNextStep} style={styles.nextButton}>
                                 <Text style={styles.nextButtonText}>{step === 'EDIT' ? "Analyze" : "Next"}</Text>
                             </TouchableOpacity>
                         </View>
@@ -460,10 +682,19 @@ export default function App() {
     return (
         <View style={styles.container}>
             <CameraView ref={cameraRef} style={styles.camera} facing="back" />
-            <View style={styles.controlsContainer}>
-                <TouchableOpacity style={styles.camBtn} onPress={pickImage}><Text style={styles.camBtnText}>Upload</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.shutterBtn} onPress={takePicture}><View style={styles.shutterInner} /></TouchableOpacity>
-                <View style={styles.camBtn} />
+
+            <View style={styles.fintechCameraWrapper}>
+                <BlurView intensity={70} tint="dark" style={styles.fintechCameraBar}>
+                    <TouchableOpacity activeOpacity={0.7} style={styles.galleryBtn} onPress={pickImage}>
+                        <Text style={styles.galleryBtnText}>Upload</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity activeOpacity={0.8} style={styles.fintechShutter} onPress={takePicture}>
+                        <View style={styles.fintechShutterInner} />
+                    </TouchableOpacity>
+
+                    <View style={styles.galleryBtnInvisible} />
+                </BlurView>
             </View>
         </View>
     );
@@ -473,22 +704,28 @@ const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: 'black' },
     camera: { flex: 1 },
     imageContainer: { flex: 1, position: 'relative', overflow: 'hidden' },
-    box: { position: 'absolute', borderRadius: 6 },
-    loaderOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 50 },
+    box: { position: 'absolute', borderRadius: 8 },
 
-    controlsContainer: { position: 'absolute', bottom: 50, width: '100%', flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
-    shutterBtn: { width: 70, height: 70, borderRadius: 35, borderWidth: 4, borderColor: '#FFFFFF', justifyContent: 'center', alignItems: 'center' },
-    shutterInner: { width: 55, height: 55, borderRadius: 30, backgroundColor: '#FFFFFF' },
-    camBtn: { padding: 12, backgroundColor: 'rgba(28, 28, 30, 0.8)', borderRadius: 12, minWidth: 80, alignItems: 'center' },
-    camBtnText: { color: '#FFFFFF', fontWeight: '700' },
+    loaderOverlay: { ...StyleSheet.absoluteFill, justifyContent: 'center', alignItems: 'center', zIndex: 50, backgroundColor: 'rgba(0,0,0,0.6)' },
+    loadingTrack: { width: 120, height: 4, backgroundColor: '#2C2C2E', borderRadius: 2, overflow: 'hidden' },
+    loadingIndicator: { width: 30, height: '100%', backgroundColor: '#0A84FF', borderRadius: 2, shadowColor: '#0A84FF', shadowOpacity: 0.8, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } },
+    loadingText: { color: '#FFFFFF', marginTop: 20, fontSize: 12, fontWeight: '700', letterSpacing: 2.5, textTransform: 'uppercase', opacity: 0.9 },
 
-    miniTag: { position: 'absolute', bottom: 4, right: 4, backgroundColor: '#1C1C1E', width: 20, height: 20, borderRadius: 4, borderWidth: 1.5, justifyContent: 'center', alignItems: 'center' },
-    miniTagText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
+    fintechCameraWrapper: { position: 'absolute', bottom: Platform.OS === 'ios' ? 50 : 30, width: '100%', alignItems: 'center' },
+    fintechCameraBar: { width: '85%', height: 100, borderRadius: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+    fintechShutter: { width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: '#FFFFFF', justifyContent: 'center', alignItems: 'center' },
+    fintechShutterInner: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#FFFFFF' },
+    galleryBtn: { paddingVertical: 12, paddingHorizontal: 18, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 20 },
+    galleryBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 14, letterSpacing: 0.5 },
+    galleryBtnInvisible: { width: 85, height: 10 },
 
-    popoverMenu: { position: 'absolute', width: 300, backgroundColor: '#1C1C1E', borderRadius: 16, padding: 12, borderWidth: 1, borderColor: '#2C2C2E', shadowColor: 'black', shadowOffset: {width:0, height: 10}, shadowOpacity: 0.5, shadowRadius: 20, elevation: 20 },
+    miniTag: { position: 'absolute', bottom: 4, right: 4, backgroundColor: '#1C1C1E', width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, justifyContent: 'center', alignItems: 'center', shadowColor: 'black', shadowOpacity: 0.5, shadowRadius: 3, shadowOffset: { width: 0, height: 2 } },
+    miniTagText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+
+    popoverMenu: { position: 'absolute', width: 310, backgroundColor: '#1C1C1E', borderRadius: 24, padding: 16, borderWidth: 1, borderColor: '#2C2C2E', shadowColor: 'black', shadowOffset: {width:0, height: 12}, shadowOpacity: 0.6, shadowRadius: 24, elevation: 20 },
     gridContainer: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
-    gridButton: { width: '31%', backgroundColor: '#2C2C2E', paddingVertical: 14, borderRadius: 10, marginBottom: 8, alignItems: 'center' },
-    gridButtonActive: { backgroundColor: '#0A84FF' },
+    gridButton: { width: '31%', backgroundColor: '#2C2C2E', paddingVertical: 16, borderRadius: 14, marginBottom: 10, alignItems: 'center' },
+    gridButtonActive: { backgroundColor: '#0A84FF', shadowColor: '#0A84FF', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
     gridButtonText: { color: '#8E8E93', fontSize: 15, fontWeight: '600' },
     gridButtonTextActive: { color: '#FFFFFF', fontWeight: '800' },
 
@@ -496,36 +733,42 @@ const styles = StyleSheet.create({
 
     darkNavBar: {
         backgroundColor: '#1C1C1E',
-        paddingHorizontal: 20,
-        paddingTop: 16,
-        paddingBottom: 40,
+        paddingHorizontal: 24,
+        paddingTop: 20,
+        paddingBottom: Platform.OS === 'ios' ? 44 : 24,
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
         borderTopWidth: 1,
-        borderTopColor: '#2C2C2E'
+        borderTopColor: '#2C2C2E',
+        shadowColor: 'black',
+        shadowOpacity: 0.3,
+        shadowRadius: 10,
+        shadowOffset: { width: 0, height: -5 }
     },
-    navCenter: { position: 'absolute', left: 0, right: 0, top: 16, bottom: 40, alignItems: 'center', justifyContent: 'center', zIndex: 0 },
+    navCenter: { position: 'absolute', left: 0, right: 0, top: 20, bottom: Platform.OS === 'ios' ? 44 : 24, alignItems: 'center', justifyContent: 'center', zIndex: 0 },
     navActionLeft: { paddingVertical: 12, paddingRight: 20, zIndex: 10 },
-    navMainTitle: { fontSize: 16, fontWeight: '700', color: '#FFFFFF' },
-    navSubText: { fontSize: 16, color: '#0A84FF', fontWeight: '600' },
+    navMainTitle: { fontSize: 17, fontWeight: '700', color: '#FFFFFF' },
+    navSubText: { fontSize: 17, color: '#0A84FF', fontWeight: '600' },
 
-    nextButton: { backgroundColor: '#0A84FF', paddingVertical: 10, paddingHorizontal: 20, borderRadius: 8, minWidth: 80, justifyContent: 'center', alignItems: 'center', zIndex: 10 },
-    nextButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+    nextButton: { backgroundColor: '#0A84FF', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 20, minWidth: 90, justifyContent: 'center', alignItems: 'center', zIndex: 10, shadowColor: '#0A84FF', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
+    nextButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
 
-    summaryCard: { position: 'absolute', bottom: 0, width: '100%', height: 340, backgroundColor: '#000000', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: '#2C2C2E' },
-    sheetHeader: { height: 65, width: '100%', alignItems: 'center', paddingTop: 10, backgroundColor: 'transparent' },
-    sheetContent: { flex: 1, paddingHorizontal: 24, paddingBottom: 25 },
+    summaryCard: { position: 'absolute', bottom: 0, width: '100%', height: 360, backgroundColor: '#151516', borderTopLeftRadius: 32, borderTopRightRadius: 32, borderTopWidth: 1, borderTopColor: '#2C2C2E', shadowColor: 'black', shadowOpacity: 0.5, shadowRadius: 16, shadowOffset: { width: 0, height: -8 } },
+    sheetHeader: { height: 65, width: '100%', alignItems: 'center', paddingTop: 12, backgroundColor: 'transparent' },
+    sheetContent: { height: 295, paddingHorizontal: 24, paddingBottom: Platform.OS === 'ios' ? 44 : 24 },
 
-    dragHandle: { width: 36, height: 5, backgroundColor: '#3A3A3C', borderRadius: 2.5 },
-    summaryHeaderText: { fontSize: 12, color: '#8E8E93', fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase' },
-    summaryTitle: { fontSize: 30, fontWeight: '800', color: '#FFFFFF', marginBottom: 24, textAlign: 'center' },
+    bottomFillerBox: { position: 'absolute', top: 360, left: 0, right: 0, height: 400, backgroundColor: '#151516' },
 
-    statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 32 },
-    statBox: { flex: 1, backgroundColor: '#1C1C1E', paddingVertical: 20, borderRadius: 16, alignItems: 'center', marginHorizontal: 6 },
-    statValue: { fontSize: 28, fontWeight: '800', color: '#FFFFFF', marginBottom: 4 },
-    statLabel: { fontSize: 11, color: '#8E8E93', fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8 },
+    dragHandle: { width: 40, height: 6, backgroundColor: '#3A3A3C', borderRadius: 3 },
+    summaryHeaderText: { fontSize: 13, color: '#8E8E93', fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase' },
+    summaryTitle: { fontSize: 34, fontWeight: '800', color: '#FFFFFF', marginBottom: 28, textAlign: 'center' },
 
-    primaryActionBtn: { backgroundColor: '#0A84FF', width: '100%', paddingVertical: 18, borderRadius: 14, alignItems: 'center' },
-    primaryActionBtnText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' }
+    statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 36 },
+    statBox: { flex: 1, backgroundColor: '#202022', paddingVertical: 24, borderRadius: 20, alignItems: 'center', marginHorizontal: 6, borderWidth: 1, borderColor: '#2C2C2E' },
+    statValue: { fontSize: 32, fontWeight: '800', color: '#FFFFFF', marginBottom: 4 },
+    statLabel: { fontSize: 12, color: '#8E8E93', fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1.0 },
+
+    primaryActionBtn: { backgroundColor: '#0A84FF', width: '100%', paddingVertical: 20, borderRadius: 20, alignItems: 'center', shadowColor: '#0A84FF', shadowOpacity: 0.3, shadowRadius: 10, shadowOffset: { width: 0, height: 5 } },
+    primaryActionBtnText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' }
 });
